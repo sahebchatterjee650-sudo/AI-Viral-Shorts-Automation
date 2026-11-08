@@ -1,448 +1,246 @@
 
 import os
-import re
-import html
+import json
+import random
 import asyncio
 import subprocess
-import textwrap
-import time
 from pathlib import Path
+from datetime import datetime, timezone
 
-import feedparser
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont
-from google import genai
+from huggingface_hub import InferenceClient
 
-# =====================================================
-# AI VIRAL SHORTS AUTOMATION
-# =====================================================
+# ==========================================
+# AI VIRAL REALISTIC SHORTS AUTOMATION
+# ==========================================
 
-MODEL = "gemini-3.8-flash"
-VOICE = "en-US-AndrewNeural"
+OUTPUT = Path("output_videos")
+OUTPUT.mkdir(exist_ok=True)
 
-WIDTH = 1080
-HEIGHT = 1920
-FPS = 30
+MODEL = os.getenv(
+    "HF_VIDEO_MODEL",
+    "Wan-AI/Wan2.2-TI2V-5B"
+)
 
-OUTPUT_DIR = Path("output_videos")
-OUTPUT_DIR.mkdir(exist_ok=True)
+VOICE = os.getenv(
+    "TTS_VOICE",
+    "en-US-AndrewNeural"
+)
 
-SCRIPT_FILE = OUTPUT_DIR / "script.txt"
-VIDEO_FILE = OUTPUT_DIR / "viral_short.mp4"
-AUDIO_FILE = OUTPUT_DIR / "voice.mp3"
-BACKGROUND_FILE = OUTPUT_DIR / "background.png"
-CAPTION_FILE = OUTPUT_DIR / "captions.srt"
+MAX_SECONDS = 45
 
-RSS_FEEDS = [
-    "https://www.sciencedaily.com/rss/top/science.xml",
-    "https://www.nasa.gov/feed/",
-    "https://www.livescience.com/feeds/all",
-    "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+# Original fictional concepts. No news/RSS.
+IDEAS = [
+    {
+        "category": "Wildlife",
+        "title": "A Fox Discovers a Hidden Garden",
+        "prompt": (
+            "Ultra photorealistic wildlife documentary footage "
+            "of a beautiful red fox discovering a tiny warm "
+            "greenhouse inside a snowy pine forest at sunrise. "
+            "Realistic fur, visible breath, falling snow, "
+            "natural animal movements, cinematic long lens, "
+            "real camera footage, vertical 9:16, no text."
+        ),
+        "script": (
+            "Imagine walking through a frozen forest and "
+            "discovering a secret garden. A curious red fox "
+            "slowly approaches a warm greenhouse surrounded "
+            "by snow. Golden light shines through the glass "
+            "as tiny snowflakes fall around it. "
+            "Would you explore this magical place?"
+        )
+    },
+    {
+        "category": "Impossible Realism",
+        "title": "An Ocean Inside a Glass Room",
+        "prompt": (
+            "Hyper realistic cinematic footage of an enormous "
+            "glass room containing a miniature living ocean, "
+            "clear moving waves, realistic fish, sunlight "
+            "caustics, physically accurate water simulation, "
+            "smooth camera movement, photorealistic, vertical 9:16."
+        ),
+        "script": (
+            "What if an entire ocean could fit inside one room? "
+            "Imagine watching tiny waves move beneath a glass "
+            "ceiling while colorful fish swim through sunlight. "
+            "This is an imaginary architectural concept, "
+            "but it looks almost real. Would you live here?"
+        )
+    },
+    {
+        "category": "Satisfying",
+        "title": "The Perfect Glass Sculpture",
+        "prompt": (
+            "Ultra realistic macro cinematic video of an expert "
+            "glass artist shaping glowing molten orange glass "
+            "into a perfectly smooth transparent sculpture. "
+            "Realistic heat shimmer, precise tools, detailed "
+            "reflections, satisfying movements, vertical 9:16."
+        ),
+        "script": (
+            "Watch closely as glowing molten glass slowly "
+            "becomes a beautiful transparent sculpture. "
+            "The artist carefully shapes the hot material "
+            "with incredible precision. The glowing orange "
+            "surface gradually becomes crystal clear. "
+            "Could you create something this beautiful?"
+        )
+    },
+    {
+        "category": "Mystery",
+        "title": "The Mysterious Door in the Forest",
+        "prompt": (
+            "Photorealistic cinematic mystery scene showing "
+            "a tiny ancient wooden door inside a giant tree "
+            "in a foggy forest. Wet autumn leaves, realistic "
+            "mist, natural wind moving branches, slow camera "
+            "approach, atmospheric lighting, vertical 9:16."
+        ),
+        "script": (
+            "Deep inside a quiet forest, something unusual "
+            "appears. A tiny wooden door is built into the "
+            "trunk of an enormous tree. Fresh footprints "
+            "stop right in front of it. The forest is silent. "
+            "Would you have the courage to open that door?"
+        )
+    },
+    {
+        "category": "Miniature World",
+        "title": "A City Inside a Teacup",
+        "prompt": (
+            "Photorealistic macro tilt shift footage of a "
+            "detailed miniature city built inside a white "
+            "ceramic teacup. Tiny moving trains, glowing "
+            "apartment windows, miniature trees, rising steam, "
+            "realistic materials, cinematic camera orbit, vertical 9:16."
+        ),
+        "script": (
+            "Look carefully. Inside this ordinary teacup "
+            "is an entire miniature city. Tiny trains move "
+            "between buildings while warm lights glow "
+            "through the windows. Steam rises above the "
+            "rooftops like morning fog. What would you "
+            "build inside a teacup?"
+        )
+    },
+    {
+        "category": "Fantasy",
+        "title": "A Giant Whale Above the Clouds",
+        "prompt": (
+            "Photorealistic magical realism cinematic footage "
+            "of a gigantic gentle blue whale swimming above "
+            "golden clouds at sunrise. Realistic whale skin, "
+            "beautiful atmospheric lighting, distant birds, "
+            "smooth aerial camera tracking, vertical 9:16."
+        ),
+        "script": (
+            "Imagine looking out of an airplane window "
+            "and seeing a giant whale swimming above the clouds. "
+            "Its movement is peaceful as golden sunlight "
+            "fills the sky. This is an imaginary fantasy scene "
+            "made to look like a real discovery. What would "
+            "you name this incredible creature?"
+        )
+    },
+    {
+        "category": "Nature",
+        "title": "A Flower After the Rain",
+        "prompt": (
+            "Ultra photorealistic macro nature video of a "
+            "beautiful purple flower opening after rainfall. "
+            "Individual water droplets rolling from petals, "
+            "soft morning sunlight, gentle breeze, detailed "
+            "pollen, cinematic macro camera, vertical 9:16."
+        ),
+        "script": (
+            "Sometimes nature creates the most beautiful "
+            "moments. After the rain, a tiny flower slowly "
+            "opens toward the morning sunlight. Water droplets "
+            "slide across its delicate petals. Every little "
+            "detail tells a beautiful story. What is your "
+            "favorite thing about nature?"
+        )
+    },
+    {
+        "category": "Dream Places",
+        "title": "A Cabin Behind a Waterfall",
+        "prompt": (
+            "Photorealistic cinematic travel footage of a "
+            "beautiful wooden cabin hidden behind a powerful "
+            "forest waterfall. Real flowing water, drifting "
+            "mist, lush green plants, warm glowing windows, "
+            "slow cinematic camera movement, vertical 9:16."
+        ),
+        "script": (
+            "Imagine discovering a beautiful wooden cabin "
+            "hidden behind a waterfall. Water rushes past "
+            "the entrance while soft golden light shines "
+            "through the windows. Mist fills the surrounding "
+            "forest. It looks like the perfect escape. "
+            "Would you spend a weekend here?"
+        )
+    },
+    {
+        "category": "Food Art",
+        "title": "A Dessert That Looks Like a Planet",
+        "prompt": (
+            "Ultra photorealistic luxury food macro video "
+            "of a pastry chef creating a glossy spherical "
+            "blue planet dessert. Mirror glaze, delicate "
+            "edible details, precision tools, studio lighting, "
+            "slow cinematic close-up, vertical 9:16."
+        ),
+        "script": (
+            "At first glance, this looks like a tiny planet. "
+            "But it is actually an imaginative dessert. "
+            "A chef carefully adds the final details to "
+            "its glossy blue surface. It looks almost too "
+            "beautiful to eat. Would you taste this creation?"
+        )
+    },
+    {
+        "category": "Adventure",
+        "title": "A Train Above the Clouds",
+        "prompt": (
+            "Ultra photorealistic cinematic travel footage "
+            "of a red passenger train crossing an old stone "
+            "railway bridge above a misty mountain valley "
+            "at sunrise. Realistic moving train, pine forests, "
+            "golden atmospheric lighting, aerial camera, vertical 9:16."
+        ),
+        "script": (
+            "A red train slowly appears through the morning "
+            "mist and crosses an ancient stone bridge. "
+            "Far below, a mountain valley disappears beneath "
+            "the clouds. Golden sunlight touches the hills. "
+            "It feels like the beginning of an unforgettable "
+            "journey. Where would you travel by train?"
+        )
+    }
 ]
 
-MAX_STORIES_TO_CHECK = 12
-
-
-# =====================================================
-# LOGGING
-# =====================================================
 
 def log(message):
-    print(f"[AI SHORTS] {message}", flush=True)
+    print("[AI VIRAL SHORTS] " + str(message), flush=True)
 
 
-# =====================================================
-# API CONFIGURATION
-# =====================================================
-
-def get_client():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is missing from GitHub Secrets."
-        )
-
-    return genai.Client(api_key=api_key)
-
-
-# =====================================================
-# RSS NEWS AND TOPIC COLLECTION
-# =====================================================
-
-def clean_text(value):
-    value = html.unescape(value or "")
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
-
-
-def collect_topics():
-    stories = []
-    seen = set()
-
-    for rss_url in RSS_FEEDS:
-        try:
-            log(f"Checking RSS: {rss_url}")
-
-            feed = feedparser.parse(
-                rss_url,
-                request_headers={
-                    "User-Agent": "AI-Viral-Shorts/1.0"
-                }
-            )
-
-            for entry in feed.entries:
-                title = clean_text(entry.get("title"))
-                summary = clean_text(
-                    entry.get("summary")
-                    or entry.get("description")
-                )
-                link = entry.get("link", "").strip()
-
-                if not title or not summary or not link:
-                    continue
-
-                if link in seen:
-                    continue
-
-                if len(summary) < 80:
-                    continue
-
-                seen.add(link)
-
-                stories.append({
-                    "title": title,
-                    "summary": summary,
-                    "link": link
-                })
-
-        except Exception as error:
-            log(f"RSS warning: {str(error)[:200]}")
-            continue
-
-    log(f"Collected {len(stories)} possible topics.")
-
-    return stories[:MAX_STORIES_TO_CHECK]
-
-
-# =====================================================
-# AI SCRIPT GENERATION
-# =====================================================
-
-def generate_script(client, story):
-
-    prompt = f"""
-You are an expert short-form video storyteller.
-
-Create an engaging 30-60 second YouTube Short
-for an American English-speaking audience.
-
-TOPIC:
-{story['title']}
-
-SOURCE INFORMATION:
-{story['summary']}
-
-SOURCE:
-{story['link']}
-
-STRICT REQUIREMENTS:
-
-1. Write approximately 85-110 spoken words.
-2. Start with an extremely interesting curiosity hook.
-3. Make the first 2 seconds attention-grabbing.
-4. Use simple, natural American English.
-5. Use short sentences.
-6. Make the story exciting but factual.
-7. Use only information supported by the source.
-8. Never invent statistics, quotes or facts.
-9. Do not present speculation as established fact.
-10. End with an interesting question.
-11. No headings, no scene directions.
-12. Return narration only.
-
-If the source information is insufficient,
-return exactly SKIP_STORY.
-"""
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt
+def run(command, timeout=900):
+    subprocess.run(
+        command,
+        check=True,
+        timeout=timeout
     )
 
-    script = (response.text or "").strip()
 
-    script = re.sub(
-        r"^```(?:text)?|```$",
-        "",
-        script,
-        flags=re.MULTILINE
-    ).strip()
+def check_program(name):
+    from shutil import which
+    return which(name) is not None
 
-    if not script:
-        return None
 
-    if "SKIP_STORY" in script.upper():
-        return None
-
-    word_count = len(script.split())
-
-    if word_count < 65 or word_count > 130:
-        log(f"Invalid script length: {word_count} words.")
-        return None
-
-    return script
-
-
-# =====================================================
-# FONT MANAGEMENT
-# =====================================================
-
-def get_font(size, bold=False):
-
-    if bold:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
-        ]
-    else:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
-        ]
-
-    for path in paths:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-
-    return ImageFont.load_default()
-
-
-# =====================================================
-# TEXT WRAPPING
-# =====================================================
-
-def wrap_text(draw, text, font, max_width):
-
-    words = text.split()
-    lines = []
-    current = ""
-
-    for word in words:
-
-        test = (current + " " + word).strip()
-
-        width = draw.textbbox(
-            (0, 0),
-            test,
-            font=font
-        )[2]
-
-        if width <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-
-    if current:
-        lines.append(current)
-
-    return lines
-
-
-# =====================================================
-# CINEMATIC BACKGROUND DESIGN
-# =====================================================
-
-def create_background(title):
-
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (4, 10, 30)
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    # Vertical cinematic gradient
-    for y in range(HEIGHT):
-
-        ratio = y / HEIGHT
-
-        color = (
-            int(5 + ratio * 8),
-            int(12 + ratio * 15),
-            int(35 + ratio * 65)
-        )
-
-        draw.line(
-            (0, y, WIDTH, y),
-            fill=color
-        )
-
-    # Decorative geometric rings
-    for radius in range(170, 850, 130):
-
-        draw.ellipse(
-            (
-                WIDTH // 2 - radius,
-                650 - radius,
-                WIDTH // 2 + radius,
-                650 + radius
-            ),
-            outline=(22, 55, 100),
-            width=3
-        )
-
-    # Header
-    draw.rounded_rectangle(
-        (45, 65, 1035, 245),
-        radius=30,
-        fill=(135, 20, 45)
-    )
-
-    draw.text(
-        (85, 112),
-        "AMAZING FACTS",
-        font=get_font(62, True),
-        fill="white"
-    )
-
-    draw.text(
-        (88, 190),
-        "DISCOVER SOMETHING NEW",
-        font=get_font(26, True),
-        fill=(255, 215, 110)
-    )
-
-    # Central title
-    draw.rounded_rectangle(
-        (45, 350, 1035, 1310),
-        radius=35,
-        fill=(8, 24, 55),
-        outline=(35, 115, 190),
-        width=4
-    )
-
-    draw.text(
-        (85, 415),
-        "DID YOU KNOW?",
-        font=get_font(44, True),
-        fill=(60, 210, 255)
-    )
-
-    title_font = get_font(65, True)
-
-    lines = wrap_text(
-        draw,
-        title.upper(),
-        title_font,
-        850
-    )
-
-    y = 565
-
-    for line in lines[:8]:
-
-        draw.text(
-            (85, y),
-            line,
-            font=title_font,
-            fill="white",
-            stroke_width=2,
-            stroke_fill=(0, 0, 0)
-        )
-
-        y += 95
-
-    # Bottom CTA
-    draw.rounded_rectangle(
-        (65, 1690, 1015, 1820),
-        radius=30,
-        fill=(175, 25, 48)
-    )
-
-    draw.text(
-        (WIDTH // 2, 1730),
-        "FOLLOW FOR MORE",
-        font=get_font(48, True),
-        fill="white",
-        anchor="mm"
-    )
-
-    draw.text(
-        (WIDTH // 2, 1790),
-        "AMAZING FACTS • SCIENCE • MYSTERY",
-        font=get_font(23, True),
-        fill=(255, 220, 125),
-        anchor="mm"
-    )
-
-    image.save(BACKGROUND_FILE)
-
-    return BACKGROUND_FILE
-
-
-# =====================================================
-# AI VOICE GENERATION
-# =====================================================
-
-async def generate_voice(script):
-
-    communicator = edge_tts.Communicate(
-        script,
-        VOICE,
-        rate="+3%",
-        volume="+0%"
-    )
-
-    await communicator.save(str(AUDIO_FILE))
-
-    if not AUDIO_FILE.exists():
-        raise RuntimeError("Voice generation failed.")
-
-    if AUDIO_FILE.stat().st_size < 1000:
-        raise RuntimeError("Generated audio is too small.")
-
-    log("AI voice generated successfully.")
-
-    return AUDIO_FILE
-
-
-# =====================================================
-# AUDIO DURATION
-# =====================================================
-
-def get_audio_duration():
-
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(AUDIO_FILE)
-        ],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-
-    return float(result.stdout.strip())
-
-
-# =====================================================
-# ANIMATED STYLE SUBTITLES
-# =====================================================
-
-def make_timestamp(seconds):
-
-    milliseconds = max(
-        0,
-        int(seconds * 1000)
-    )
+def timestamp(seconds):
+    milliseconds = int(seconds * 1000)
 
     hours, milliseconds = divmod(
         milliseconds, 3600000
@@ -452,253 +250,372 @@ def make_timestamp(seconds):
         milliseconds, 60000
     )
 
-    secs, milliseconds = divmod(
+    seconds, milliseconds = divmod(
         milliseconds, 1000
     )
 
     return (
         f"{hours:02}:"
         f"{minutes:02}:"
-        f"{secs:02},"
+        f"{seconds:02},"
         f"{milliseconds:03}"
     )
 
 
-def create_captions(script, duration):
+# ==========================================
+# SELECT ORIGINAL VIDEO IDEA
+# ==========================================
+
+def select_idea():
+
+    seed = int(
+        datetime.now(timezone.utc).strftime("%Y%m%d")
+    )
+
+    rng = random.Random(seed)
+
+    return rng.choice(IDEAS)
+
+
+# ==========================================
+# GENERATE REAL AI VIDEO
+# ==========================================
+
+def generate_video(prompt):
+
+    token = os.getenv("HF_TOKEN", "").strip()
+
+    if not token:
+        raise RuntimeError(
+            "HF_TOKEN missing. Add Hugging Face token "
+            "in GitHub Actions Secrets."
+        )
+
+    log("Connecting to Hugging Face Inference...")
+
+    client = InferenceClient(
+        api_key=token,
+        timeout=900
+    )
+
+    log("Requesting one AI video generation...")
+
+    video_bytes = client.text_to_video(
+        prompt=prompt,
+        model=MODEL,
+        num_frames=49,
+        num_inference_steps=20,
+        guidance_scale=6.0,
+        negative_prompt=[
+            "blurry",
+            "low quality",
+            "distorted objects",
+            "bad anatomy",
+            "watermark",
+            "text",
+            "flickering"
+        ]
+    )
+
+    if not video_bytes or len(video_bytes) < 10000:
+        raise RuntimeError(
+            "AI provider returned an invalid video."
+        )
+
+    video_path = OUTPUT / "ai_source.mp4"
+
+    video_path.write_bytes(video_bytes)
+
+    log(
+        f"AI video downloaded: "
+        f"{len(video_bytes):,} bytes"
+    )
+
+    return video_path
+
+
+# ==========================================
+# GENERATE ENGLISH AI VOICE
+# ==========================================
+
+async def edge_voice(script, output):
+
+    communicator = edge_tts.Communicate(
+        script,
+        VOICE,
+        rate="+2%",
+        volume="+0%"
+    )
+
+    await communicator.save(str(output))
+
+
+def generate_voice(script):
+
+    audio = OUTPUT / "voice.mp3"
+
+    try:
+        log("Generating natural English voice...")
+
+        asyncio.run(edge_voice(script, audio))
+
+        if audio.exists() and audio.stat().st_size > 1000:
+            return audio
+
+        raise RuntimeError("Edge TTS returned empty audio.")
+
+    except Exception as error:
+
+        log(f"Edge TTS unavailable: {error}")
+
+        # Offline fallback
+        if not check_program("espeak-ng"):
+            raise RuntimeError(
+                "Both Edge TTS and offline TTS are unavailable."
+            )
+
+        wav = OUTPUT / "voice_fallback.wav"
+
+        run([
+            "espeak-ng",
+            "-v", "en-us",
+            "-s", "150",
+            "-w", str(wav),
+            script
+        ])
+
+        run([
+            "ffmpeg", "-y",
+            "-i", str(wav),
+            "-codec:a", "libmp3lame",
+            "-q:a", "3",
+            str(audio)
+        ])
+
+        if not audio.exists() or audio.stat().st_size < 1000:
+            raise RuntimeError("Offline voice generation failed.")
+
+        return audio
+
+
+# ==========================================
+# AUDIO DURATION
+# ==========================================
+
+def audio_duration(audio):
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio)
+        ],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    return float(result.stdout.strip())
+
+
+# ==========================================
+# CAPTION GENERATION
+# ==========================================
+
+def generate_captions(script, duration):
 
     words = script.split()
 
     chunks = [
-        words[i:i + 4]
-        for i in range(0, len(words), 4)
+        words[i:i + 5]
+        for i in range(0, len(words), 5)
     ]
 
-    total_words = sum(len(chunk) for chunk in chunks)
+    total_words = sum(
+        len(chunk) for chunk in chunks
+    )
 
-    current_time = 0.0
+    current = 0.0
+
+    caption_file = OUTPUT / "captions.srt"
 
     with open(
-        CAPTION_FILE,
+        caption_file,
         "w",
         encoding="utf-8"
     ) as file:
 
-        for index, chunk in enumerate(chunks):
+        for index, chunk in enumerate(chunks, 1):
 
-            chunk_duration = (
-                duration * len(chunk) / total_words
-            )
+            part = duration * len(chunk) / total_words
 
-            start = current_time
-            end = current_time + chunk_duration
+            start = current
+            end = current + part
 
             file.write(
-                f"{index + 1}\n"
-                f"{make_timestamp(start)} --> "
-                f"{make_timestamp(end)}\n"
+                f"{index}\n"
+                f"{timestamp(start)} --> "
+                f"{timestamp(end)}\n"
                 f"{' '.join(chunk)}\n\n"
             )
 
-            current_time = end
+            current = end
 
-    log("Captions generated successfully.")
-
-    return CAPTION_FILE
+    return caption_file
 
 
-# =====================================================
-# VIDEO CREATION
-# =====================================================
+# ==========================================
+# VIDEO RENDERING
+# ==========================================
 
-def create_video(title, script):
+def render_video(source, audio, captions, output, duration):
 
-    log("Creating cinematic background...")
+    log("Rendering vertical 1080x1920 video...")
 
-    create_background(title)
+    subtitle_path = (
+        captions.resolve().as_posix()
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+    )
 
-    log("Generating voice...")
-
-    asyncio.run(generate_voice(script))
-
-    duration = get_audio_duration()
-
-    log(f"Audio duration: {duration:.2f} seconds")
-
-    if duration < 20 or duration > 60:
-        raise RuntimeError(
-            f"Video duration outside 20-60 seconds: "
-            f"{duration:.2f}"
-        )
-
-    create_captions(script, duration)
-
-    # Escape file path for FFmpeg
-    subtitle_path = CAPTION_FILE.resolve().as_posix()
-
-    subtitle_filter = (
-        f"subtitles=filename='{subtitle_path}':"
+    video_filter = (
+        "scale=1080:1920:"
+        "force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "setsar=1,"
+        "fps=30,"
+        f"subtitles='{subtitle_path}':"
         "force_style='"
         "FontName=DejaVu Sans,"
-        "FontSize=25,"
+        "FontSize=17,"
         "Bold=1,"
         "PrimaryColour=&H00FFFFFF,"
         "OutlineColour=&H00000000,"
         "Outline=3,"
         "Shadow=1,"
         "Alignment=2,"
-        "MarginV=380"
+        "MarginV=260"
         "'"
     )
 
-    video_filter = (
-        "zoompan="
-        "z='min(zoom+0.00035,1.06)':"
-        "d=1:"
-        "s=1080x1920:"
-        "fps=30,"
-        + subtitle_filter
-    )
-
-    command = [
+    run([
         "ffmpeg",
         "-y",
-        "-loop", "1",
-        "-framerate", "30",
-        "-i", str(BACKGROUND_FILE),
-        "-i", str(AUDIO_FILE),
+        "-stream_loop", "-1",
+        "-i", str(source),
+        "-i", str(audio),
         "-vf", video_filter,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-t", str(duration),
         "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "stillimage",
+        "-preset", "veryfast",
+        "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-r", "30",
         "-c:a", "aac",
         "-b:a", "128k",
-        "-t", str(duration),
         "-shortest",
         "-movflags", "+faststart",
-        "-metadata", f"title={title}",
-        str(VIDEO_FILE)
-    ]
+        str(output)
+    ])
 
-    log("Rendering MP4 video...")
+    if not output.exists() or output.stat().st_size < 50000:
+        raise RuntimeError("Final video creation failed.")
 
-    subprocess.run(
-        command,
-        check=True,
-        timeout=300
-    )
-
-    if not VIDEO_FILE.exists():
-        raise RuntimeError("MP4 file was not created.")
-
-    if VIDEO_FILE.stat().st_size < 10000:
-        raise RuntimeError("MP4 file is incomplete.")
-
-    log("VIDEO CREATED SUCCESSFULLY!")
-    log(f"Video: {VIDEO_FILE}")
-    log(f"Duration: {duration:.2f} seconds")
+    log("Final MP4 successfully created.")
 
 
-# =====================================================
-# MAIN AUTOMATION
-# =====================================================
+# ==========================================
+# MAIN
+# ==========================================
 
 def main():
 
-    log("====================================")
-    log("AI VIRAL SHORTS AUTOMATION STARTED")
-    log("====================================")
+    log("================================")
+    log("AI REALISTIC SHORTS STARTED")
+    log("================================")
 
-    if not shutil_which("ffmpeg"):
+    if not check_program("ffmpeg"):
         raise RuntimeError("FFmpeg is missing.")
 
-    if not shutil_which("ffprobe"):
+    if not check_program("ffprobe"):
         raise RuntimeError("FFprobe is missing.")
 
-    client = get_client()
+    idea = select_idea()
 
-    stories = collect_topics()
+    category = idea["category"]
+    title = idea["title"]
+    prompt = idea["prompt"]
+    script = idea["script"]
 
-    if not stories:
-        raise RuntimeError("No usable RSS topics found.")
+    log(f"Category: {category}")
+    log(f"Title: {title}")
 
-    video_created = False
+    (OUTPUT / "script.txt").write_text(
+        script,
+        encoding="utf-8"
+    )
 
-    for index, story in enumerate(stories, start=1):
+    (OUTPUT / "video_prompt.txt").write_text(
+        prompt,
+        encoding="utf-8"
+    )
 
-        log(f"Checking story {index}: {story['title']}")
+    metadata = {
+        "title": title,
+        "category": category,
+        "description": (
+            script
+            + "\n\nAI-generated fictional visual."
+        ),
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat()
+    }
 
-        try:
+    (OUTPUT / "metadata.json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8"
+    )
 
-            script = generate_script(
-                client,
-                story
-            )
+    # One real AI video generation attempt
+    source = generate_video(prompt)
 
-            if not script:
-                log("Story skipped by quality check.")
-                continue
+    # Narration
+    audio = generate_voice(script)
 
-            with open(
-                SCRIPT_FILE,
-                "w",
-                encoding="utf-8"
-            ) as file:
+    duration = audio_duration(audio)
 
-                file.write(
-                    f"TITLE: {story['title']}\n\n"
-                    f"{script}\n\n"
-                    f"SOURCE: {story['link']}\n"
-                )
-
-            log("AI script created.")
-
-            create_video(
-                story["title"],
-                script
-            )
-
-            video_created = True
-            break
-
-        except Exception as error:
-
-            log(
-                f"Story processing failed: "
-                f"{str(error)[:400]}"
-            )
-
-            continue
-
-    if not video_created:
+    if duration < 10 or duration > MAX_SECONDS:
         raise RuntimeError(
-            "No video could be created from available stories."
+            f"Invalid audio duration: {duration:.2f}"
         )
 
-    log("====================================")
-    log("AUTOMATION COMPLETED SUCCESSFULLY")
-    log("====================================")
+    # Captions
+    captions = generate_captions(
+        script,
+        duration
+    )
 
+    # Final rendering
+    final = OUTPUT / "viral_short.mp4"
 
-# =====================================================
-# UTILITY
-# =====================================================
+    render_video(
+        source,
+        audio,
+        captions,
+        final,
+        duration
+    )
 
-def shutil_which(command):
-
-    from shutil import which
-
-    return which(command) is not None
+    log("================================")
+    log("AUTOMATION COMPLETED")
+    log(f"OUTPUT: {final}")
+    log("================================")
 
 
 if __name__ == "__main__":
-
-    try:
-        main()
-
-    except Exception as error:
-
-        log("FATAL ERROR: " + str(error))
-
-        raise
+    main()
