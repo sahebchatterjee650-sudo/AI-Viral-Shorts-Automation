@@ -1,16 +1,18 @@
 
-name: AI Viral Shorts Automation
+name: AI Viral Realistic Shorts
 
 on:
   workflow_dispatch:
+
   schedule:
+    # Every day at 5:30 PM India time
     - cron: "0 12 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: viral-shorts
+  group: ai-viral-realistic-shorts
   cancel-in-progress: false
 
 jobs:
@@ -28,10 +30,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and TTS
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core
+
           ffmpeg -version
           ffprobe -version
 
@@ -40,18 +43,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate AI Shorts
+      - name: Generate AI Realistic Short
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_VIDEO_MODEL: Wan-AI/Wan2.2-TI2V-5B
+          TTS_VOICE: en-US-AndrewNeural
           PYTHONUNBUFFERED: "1"
+
         run: |
           python -u main.py
 
       - name: Save Generated Videos
         if: always()
         uses: actions/upload-artifact@v4
+
         with:
-          name: AI-Viral-Shorts
+          name: AI-Realistic-Short-${{ github.run_number }}
           path: output_videos/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 7
