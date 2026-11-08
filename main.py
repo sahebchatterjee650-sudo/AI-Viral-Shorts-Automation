@@ -1,97 +1,169 @@
 
 import os
 import re
+import html
 import asyncio
 import subprocess
 import textwrap
+import time
 from pathlib import Path
-from io import BytesIO
 
 import feedparser
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 
-# ==========================================
+# =====================================================
 # AI VIRAL SHORTS AUTOMATION
-# ==========================================
+# =====================================================
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 VOICE = "en-US-AndrewNeural"
 
 WIDTH = 1080
 HEIGHT = 1920
+FPS = 30
 
-OUTPUT = Path("output_videos")
-OUTPUT.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("output_videos")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+SCRIPT_FILE = OUTPUT_DIR / "script.txt"
+VIDEO_FILE = OUTPUT_DIR / "viral_short.mp4"
+AUDIO_FILE = OUTPUT_DIR / "voice.mp3"
+BACKGROUND_FILE = OUTPUT_DIR / "background.png"
+CAPTION_FILE = OUTPUT_DIR / "captions.srt"
 
 RSS_FEEDS = [
     "https://www.sciencedaily.com/rss/top/science.xml",
     "https://www.nasa.gov/feed/",
-    "https://www.livescience.com/feeds/all"
+    "https://www.livescience.com/feeds/all",
+    "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
 ]
 
-
-def get_font(size, bold=False):
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if bold else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    ]
-
-    for path in paths:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-
-    return ImageFont.load_default()
+MAX_STORIES_TO_CHECK = 12
 
 
-def get_topic():
-    for url in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(url)
+# =====================================================
+# LOGGING
+# =====================================================
 
-            if feed.entries:
-                for entry in feed.entries:
-                    title = entry.get("title", "").strip()
-                    summary = entry.get("summary", "").strip()
-                    link = entry.get("link", "").strip()
-
-                    if title and summary and link:
-                        return title, summary, link
-
-        except Exception as error:
-            print("RSS warning:", error)
-
-    raise RuntimeError("No usable RSS story found.")
+def log(message):
+    print(f"[AI SHORTS] {message}", flush=True)
 
 
-def generate_script(title, summary, link):
-    api_key = os.getenv("GEMINI_API_KEY")
+# =====================================================
+# API CONFIGURATION
+# =====================================================
+
+def get_client():
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
 
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing.")
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing from GitHub Secrets."
+        )
 
-    client = genai.Client(api_key=api_key)
+    return genai.Client(api_key=api_key)
+
+
+# =====================================================
+# RSS NEWS AND TOPIC COLLECTION
+# =====================================================
+
+def clean_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def collect_topics():
+    stories = []
+    seen = set()
+
+    for rss_url in RSS_FEEDS:
+        try:
+            log(f"Checking RSS: {rss_url}")
+
+            feed = feedparser.parse(
+                rss_url,
+                request_headers={
+                    "User-Agent": "AI-Viral-Shorts/1.0"
+                }
+            )
+
+            for entry in feed.entries:
+                title = clean_text(entry.get("title"))
+                summary = clean_text(
+                    entry.get("summary")
+                    or entry.get("description")
+                )
+                link = entry.get("link", "").strip()
+
+                if not title or not summary or not link:
+                    continue
+
+                if link in seen:
+                    continue
+
+                if len(summary) < 80:
+                    continue
+
+                seen.add(link)
+
+                stories.append({
+                    "title": title,
+                    "summary": summary,
+                    "link": link
+                })
+
+        except Exception as error:
+            log(f"RSS warning: {str(error)[:200]}")
+            continue
+
+    log(f"Collected {len(stories)} possible topics.")
+
+    return stories[:MAX_STORIES_TO_CHECK]
+
+
+# =====================================================
+# AI SCRIPT GENERATION
+# =====================================================
+
+def generate_script(client, story):
 
     prompt = f"""
-Create an engaging YouTube Short script for a USA audience.
+You are an expert short-form video storyteller.
 
-TOPIC: {title}
-SOURCE SUMMARY: {summary}
-SOURCE URL: {link}
+Create an engaging 30-60 second YouTube Short
+for an American English-speaking audience.
 
-Rules:
-- English language.
-- 100 to 120 words.
-- Strong curiosity hook in the first sentence.
-- Interesting storytelling.
-- Short, natural spoken sentences.
-- End with a memorable question.
-- Use only facts supported by the source.
-- Do not invent facts or quotes.
-- No headings, labels or hashtags.
-- Return only the narration script.
+TOPIC:
+{story['title']}
+
+SOURCE INFORMATION:
+{story['summary']}
+
+SOURCE:
+{story['link']}
+
+STRICT REQUIREMENTS:
+
+1. Write approximately 85-110 spoken words.
+2. Start with an extremely interesting curiosity hook.
+3. Make the first 2 seconds attention-grabbing.
+4. Use simple, natural American English.
+5. Use short sentences.
+6. Make the story exciting but factual.
+7. Use only information supported by the source.
+8. Never invent statistics, quotes or facts.
+9. Do not present speculation as established fact.
+10. End with an interesting question.
+11. No headings, no scene directions.
+12. Return narration only.
+
+If the source information is insufficient,
+return exactly SKIP_STORY.
 """
 
     response = client.models.generate_content(
@@ -101,29 +173,118 @@ Rules:
 
     script = (response.text or "").strip()
 
-    if len(script.split()) < 65:
-        raise RuntimeError("AI generated an incomplete script.")
+    script = re.sub(
+        r"^```(?:text)?|```$",
+        "",
+        script,
+        flags=re.MULTILINE
+    ).strip()
+
+    if not script:
+        return None
+
+    if "SKIP_STORY" in script.upper():
+        return None
+
+    word_count = len(script.split())
+
+    if word_count < 65 or word_count > 130:
+        log(f"Invalid script length: {word_count} words.")
+        return None
 
     return script
 
 
-def create_background(title):
-    image = Image.new("RGB", (WIDTH, HEIGHT))
-    pixels = image.load()
+# =====================================================
+# FONT MANAGEMENT
+# =====================================================
 
-    for y in range(HEIGHT):
-        for x in range(WIDTH):
-            ratio = y / HEIGHT
-            pixels[x, y] = (
-                int(5 + ratio * 12),
-                int(12 + ratio * 15),
-                int(35 + ratio * 65)
-            )
+def get_font(size, bold=False):
+
+    if bold:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        ]
+    else:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
+        ]
+
+    for path in paths:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
+
+
+# =====================================================
+# TEXT WRAPPING
+# =====================================================
+
+def wrap_text(draw, text, font, max_width):
+
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+
+        test = (current + " " + word).strip()
+
+        width = draw.textbbox(
+            (0, 0),
+            test,
+            font=font
+        )[2]
+
+        if width <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+# =====================================================
+# CINEMATIC BACKGROUND DESIGN
+# =====================================================
+
+def create_background(title):
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (4, 10, 30)
+    )
 
     draw = ImageDraw.Draw(image)
 
-    # Decorative cinematic rings
-    for radius in range(150, 850, 130):
+    # Vertical cinematic gradient
+    for y in range(HEIGHT):
+
+        ratio = y / HEIGHT
+
+        color = (
+            int(5 + ratio * 8),
+            int(12 + ratio * 15),
+            int(35 + ratio * 65)
+        )
+
+        draw.line(
+            (0, y, WIDTH, y),
+            fill=color
+        )
+
+    # Decorative geometric rings
+    for radius in range(170, 850, 130):
+
         draw.ellipse(
             (
                 WIDTH // 2 - radius,
@@ -131,195 +292,413 @@ def create_background(title):
                 WIDTH // 2 + radius,
                 650 + radius
             ),
-            outline=(25, 65, 115),
+            outline=(22, 55, 100),
             width=3
         )
 
+    # Header
     draw.rounded_rectangle(
-        (55, 120, 1025, 270),
+        (45, 65, 1035, 245),
         radius=30,
-        fill=(160, 25, 45)
+        fill=(135, 20, 45)
     )
 
     draw.text(
-        (95, 165),
-        "DID YOU KNOW?",
-        font=get_font(65, True),
+        (85, 112),
+        "AMAZING FACTS",
+        font=get_font(62, True),
         fill="white"
     )
 
     draw.text(
-        (75, 900),
-        "AMAZING FACTS",
-        font=get_font(43, True),
-        fill=(50, 210, 255)
+        (88, 190),
+        "DISCOVER SOMETHING NEW",
+        font=get_font(26, True),
+        fill=(255, 215, 110)
     )
 
-    font = get_font(66, True)
-    words = title.split()
-    lines = textwrap.wrap(" ".join(words), width=23)
+    # Central title
+    draw.rounded_rectangle(
+        (45, 350, 1035, 1310),
+        radius=35,
+        fill=(8, 24, 55),
+        outline=(35, 115, 190),
+        width=4
+    )
 
-    y = 1010
+    draw.text(
+        (85, 415),
+        "DID YOU KNOW?",
+        font=get_font(44, True),
+        fill=(60, 210, 255)
+    )
 
-    for line in lines[:5]:
+    title_font = get_font(65, True)
+
+    lines = wrap_text(
+        draw,
+        title.upper(),
+        title_font,
+        850
+    )
+
+    y = 565
+
+    for line in lines[:8]:
+
         draw.text(
-            (75, y),
+            (85, y),
             line,
-            font=font,
+            font=title_font,
             fill="white",
             stroke_width=2,
             stroke_fill=(0, 0, 0)
         )
-        y += 100
+
+        y += 95
+
+    # Bottom CTA
+    draw.rounded_rectangle(
+        (65, 1690, 1015, 1820),
+        radius=30,
+        fill=(175, 25, 48)
+    )
 
     draw.text(
-        (75, 1750),
+        (WIDTH // 2, 1730),
         "FOLLOW FOR MORE",
-        font=get_font(43, True),
-        fill=(255, 205, 65)
+        font=get_font(48, True),
+        fill="white",
+        anchor="mm"
     )
 
-    path = OUTPUT / "background.png"
-    image.save(path)
-    return path
+    draw.text(
+        (WIDTH // 2, 1790),
+        "AMAZING FACTS • SCIENCE • MYSTERY",
+        font=get_font(23, True),
+        fill=(255, 220, 125),
+        anchor="mm"
+    )
+
+    image.save(BACKGROUND_FILE)
+
+    return BACKGROUND_FILE
 
 
-async def create_voice(script):
-    path = OUTPUT / "voice.mp3"
+# =====================================================
+# AI VOICE GENERATION
+# =====================================================
 
-    tts = edge_tts.Communicate(
+async def generate_voice(script):
+
+    communicator = edge_tts.Communicate(
         script,
         VOICE,
-        rate="+5%"
+        rate="+3%",
+        volume="+0%"
     )
 
-    await tts.save(str(path))
-    return path
+    await communicator.save(str(AUDIO_FILE))
+
+    if not AUDIO_FILE.exists():
+        raise RuntimeError("Voice generation failed.")
+
+    if AUDIO_FILE.stat().st_size < 1000:
+        raise RuntimeError("Generated audio is too small.")
+
+    log("AI voice generated successfully.")
+
+    return AUDIO_FILE
 
 
-def create_captions(script, duration):
-    words = script.split()
-    chunks = [
-        words[i:i + 4]
-        for i in range(0, len(words), 4)
-    ]
+# =====================================================
+# AUDIO DURATION
+# =====================================================
 
-    path = OUTPUT / "captions.srt"
+def get_audio_duration():
 
-    def stamp(seconds):
-        ms = int(seconds * 1000)
-        hours, ms = divmod(ms, 3600000)
-        minutes, ms = divmod(ms, 60000)
-        secs, ms = divmod(ms, 1000)
-        return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
-
-    with open(path, "w", encoding="utf-8") as file:
-        for i, chunk in enumerate(chunks):
-            start = duration * i / len(chunks)
-            end = duration * (i + 1) / len(chunks)
-
-            file.write(
-                f"{i+1}\n"
-                f"{stamp(start)} --> {stamp(end)}\n"
-                f"{' '.join(chunk)}\n\n"
-            )
-
-    return path
-
-
-def make_video(title, script):
-    background = create_background(title)
-
-    audio = asyncio.run(create_voice(script))
-
-    probe = subprocess.run(
+    result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
+            "ffprobe",
+            "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            str(audio)
+            str(AUDIO_FILE)
         ],
         capture_output=True,
         text=True,
         check=True
     )
 
-    duration = float(probe.stdout.strip())
+    return float(result.stdout.strip())
 
-    if not 20 <= duration <= 60:
+
+# =====================================================
+# ANIMATED STYLE SUBTITLES
+# =====================================================
+
+def make_timestamp(seconds):
+
+    milliseconds = max(
+        0,
+        int(seconds * 1000)
+    )
+
+    hours, milliseconds = divmod(
+        milliseconds, 3600000
+    )
+
+    minutes, milliseconds = divmod(
+        milliseconds, 60000
+    )
+
+    secs, milliseconds = divmod(
+        milliseconds, 1000
+    )
+
+    return (
+        f"{hours:02}:"
+        f"{minutes:02}:"
+        f"{secs:02},"
+        f"{milliseconds:03}"
+    )
+
+
+def create_captions(script, duration):
+
+    words = script.split()
+
+    chunks = [
+        words[i:i + 4]
+        for i in range(0, len(words), 4)
+    ]
+
+    total_words = sum(len(chunk) for chunk in chunks)
+
+    current_time = 0.0
+
+    with open(
+        CAPTION_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        for index, chunk in enumerate(chunks):
+
+            chunk_duration = (
+                duration * len(chunk) / total_words
+            )
+
+            start = current_time
+            end = current_time + chunk_duration
+
+            file.write(
+                f"{index + 1}\n"
+                f"{make_timestamp(start)} --> "
+                f"{make_timestamp(end)}\n"
+                f"{' '.join(chunk)}\n\n"
+            )
+
+            current_time = end
+
+    log("Captions generated successfully.")
+
+    return CAPTION_FILE
+
+
+# =====================================================
+# VIDEO CREATION
+# =====================================================
+
+def create_video(title, script):
+
+    log("Creating cinematic background...")
+
+    create_background(title)
+
+    log("Generating voice...")
+
+    asyncio.run(generate_voice(script))
+
+    duration = get_audio_duration()
+
+    log(f"Audio duration: {duration:.2f} seconds")
+
+    if duration < 20 or duration > 60:
         raise RuntimeError(
-            f"Video duration is {duration:.1f}s; "
-            "expected 20–60 seconds."
+            f"Video duration outside 20-60 seconds: "
+            f"{duration:.2f}"
         )
 
-    captions = create_captions(script, duration)
+    create_captions(script, duration)
 
-    video = OUTPUT / "viral_short.mp4"
+    # Escape file path for FFmpeg
+    subtitle_path = CAPTION_FILE.resolve().as_posix()
 
     subtitle_filter = (
-        f"subtitles=filename='{captions.as_posix()}':"
-        "force_style='FontName=DejaVu Sans,"
-        "FontSize=24,PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,Outline=3,"
-        "Bold=1,Alignment=2,MarginV=400'"
+        f"subtitles=filename='{subtitle_path}':"
+        "force_style='"
+        "FontName=DejaVu Sans,"
+        "FontSize=25,"
+        "Bold=1,"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "Outline=3,"
+        "Shadow=1,"
+        "Alignment=2,"
+        "MarginV=380"
+        "'"
     )
 
     video_filter = (
-        "zoompan=z='min(zoom+0.0004,1.08)':"
-        "d=1:s=1080x1920:fps=30,"
+        "zoompan="
+        "z='min(zoom+0.00035,1.06)':"
+        "d=1:"
+        "s=1080x1920:"
+        "fps=30,"
         + subtitle_filter
     )
 
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loop", "1",
+        "-framerate", "30",
+        "-i", str(BACKGROUND_FILE),
+        "-i", str(AUDIO_FILE),
+        "-vf", video_filter,
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "stillimage",
+        "-pix_fmt", "yuv420p",
+        "-r", "30",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-t", str(duration),
+        "-shortest",
+        "-movflags", "+faststart",
+        "-metadata", f"title={title}",
+        str(VIDEO_FILE)
+    ]
+
+    log("Rendering MP4 video...")
+
     subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-loop", "1",
-            "-framerate", "30",
-            "-i", str(background),
-            "-i", str(audio),
-            "-vf", video_filter,
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-t", str(duration),
-            "-shortest",
-            "-movflags", "+faststart",
-            str(video)
-        ],
+        command,
         check=True,
         timeout=300
     )
 
-    print("VIDEO CREATED:", video)
+    if not VIDEO_FILE.exists():
+        raise RuntimeError("MP4 file was not created.")
 
+    if VIDEO_FILE.stat().st_size < 10000:
+        raise RuntimeError("MP4 file is incomplete.")
+
+    log("VIDEO CREATED SUCCESSFULLY!")
+    log(f"Video: {VIDEO_FILE}")
+    log(f"Duration: {duration:.2f} seconds")
+
+
+# =====================================================
+# MAIN AUTOMATION
+# =====================================================
 
 def main():
-    print("AI VIRAL SHORTS AUTOMATION STARTED")
 
-    title, summary, link = get_topic()
+    log("====================================")
+    log("AI VIRAL SHORTS AUTOMATION STARTED")
+    log("====================================")
 
-    print("SELECTED TOPIC:", title)
-    print("SOURCE:", link)
+    if not shutil_which("ffmpeg"):
+        raise RuntimeError("FFmpeg is missing.")
 
-    script = generate_script(title, summary, link)
+    if not shutil_which("ffprobe"):
+        raise RuntimeError("FFprobe is missing.")
 
-    with open(
-        OUTPUT / "script.txt",
-        "w",
-        encoding="utf-8"
-    ) as file:
-        file.write(
-            f"{title}\n\n{script}\n\nSource: {link}"
+    client = get_client()
+
+    stories = collect_topics()
+
+    if not stories:
+        raise RuntimeError("No usable RSS topics found.")
+
+    video_created = False
+
+    for index, story in enumerate(stories, start=1):
+
+        log(f"Checking story {index}: {story['title']}")
+
+        try:
+
+            script = generate_script(
+                client,
+                story
+            )
+
+            if not script:
+                log("Story skipped by quality check.")
+                continue
+
+            with open(
+                SCRIPT_FILE,
+                "w",
+                encoding="utf-8"
+            ) as file:
+
+                file.write(
+                    f"TITLE: {story['title']}\n\n"
+                    f"{script}\n\n"
+                    f"SOURCE: {story['link']}\n"
+                )
+
+            log("AI script created.")
+
+            create_video(
+                story["title"],
+                script
+            )
+
+            video_created = True
+            break
+
+        except Exception as error:
+
+            log(
+                f"Story processing failed: "
+                f"{str(error)[:400]}"
+            )
+
+            continue
+
+    if not video_created:
+        raise RuntimeError(
+            "No video could be created from available stories."
         )
 
-    print("SCRIPT GENERATED")
+    log("====================================")
+    log("AUTOMATION COMPLETED SUCCESSFULLY")
+    log("====================================")
 
-    make_video(title, script)
 
-    print("VIDEO GENERATION COMPLETED")
+# =====================================================
+# UTILITY
+# =====================================================
+
+def shutil_which(command):
+
+    from shutil import which
+
+    return which(command) is not None
 
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        main()
+
+    except Exception as error:
+
+        log("FATAL ERROR: " + str(error))
+
+        raise
