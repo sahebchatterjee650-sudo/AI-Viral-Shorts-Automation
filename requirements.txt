@@ -1,0 +1,7 @@
+feedparser
+requests
+Pillow
+edge-tts
+google-genai
+python-dotenv
+imageio-ffmpeg
