@@ -1,222 +1,157 @@
 
 import os
+import re
 import json
 import random
 import asyncio
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
+from shutil import which
 
 import edge_tts
-from huggingface_hub import InferenceClient
 
-# ==========================================
-# AI VIRAL REALISTIC SHORTS AUTOMATION
-# ==========================================
+# =========================================
+# FREE AI VIRAL REALISTIC SHORTS AUTOMATION
+# =========================================
 
 OUTPUT = Path("output_videos")
+FOOTAGE = Path("free_footage")
+
 OUTPUT.mkdir(exist_ok=True)
 
-MODEL = os.getenv(
-    "HF_VIDEO_MODEL",
-    "Wan-AI/Wan2.2-TI2V-5B"
-)
-
-VOICE = os.getenv(
-    "TTS_VOICE",
-    "en-US-AndrewNeural"
-)
-
+VOICE = os.getenv("TTS_VOICE", "en-US-AndrewNeural")
+DAILY_VIDEOS = 4
 MAX_SECONDS = 45
 
-# Original fictional concepts. No news/RSS.
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
 IDEAS = [
     {
         "category": "Wildlife",
+        "tags": ["fox", "wildlife", "animal", "forest", "nature"],
         "title": "A Fox Discovers a Hidden Garden",
-        "prompt": (
-            "Ultra photorealistic wildlife documentary footage "
-            "of a beautiful red fox discovering a tiny warm "
-            "greenhouse inside a snowy pine forest at sunrise. "
-            "Realistic fur, visible breath, falling snow, "
-            "natural animal movements, cinematic long lens, "
-            "real camera footage, vertical 9:16, no text."
-        ),
         "script": (
-            "Imagine walking through a frozen forest and "
-            "discovering a secret garden. A curious red fox "
-            "slowly approaches a warm greenhouse surrounded "
-            "by snow. Golden light shines through the glass "
-            "as tiny snowflakes fall around it. "
-            "Would you explore this magical place?"
-        )
-    },
-    {
-        "category": "Impossible Realism",
-        "title": "An Ocean Inside a Glass Room",
-        "prompt": (
-            "Hyper realistic cinematic footage of an enormous "
-            "glass room containing a miniature living ocean, "
-            "clear moving waves, realistic fish, sunlight "
-            "caustics, physically accurate water simulation, "
-            "smooth camera movement, photorealistic, vertical 9:16."
-        ),
-        "script": (
-            "What if an entire ocean could fit inside one room? "
-            "Imagine watching tiny waves move beneath a glass "
-            "ceiling while colorful fish swim through sunlight. "
-            "This is an imaginary architectural concept, "
-            "but it looks almost real. Would you live here?"
-        )
-    },
-    {
-        "category": "Satisfying",
-        "title": "The Perfect Glass Sculpture",
-        "prompt": (
-            "Ultra realistic macro cinematic video of an expert "
-            "glass artist shaping glowing molten orange glass "
-            "into a perfectly smooth transparent sculpture. "
-            "Realistic heat shimmer, precise tools, detailed "
-            "reflections, satisfying movements, vertical 9:16."
-        ),
-        "script": (
-            "Watch closely as glowing molten glass slowly "
-            "becomes a beautiful transparent sculpture. "
-            "The artist carefully shapes the hot material "
-            "with incredible precision. The glowing orange "
-            "surface gradually becomes crystal clear. "
-            "Could you create something this beautiful?"
-        )
-    },
-    {
-        "category": "Mystery",
-        "title": "The Mysterious Door in the Forest",
-        "prompt": (
-            "Photorealistic cinematic mystery scene showing "
-            "a tiny ancient wooden door inside a giant tree "
-            "in a foggy forest. Wet autumn leaves, realistic "
-            "mist, natural wind moving branches, slow camera "
-            "approach, atmospheric lighting, vertical 9:16."
-        ),
-        "script": (
-            "Deep inside a quiet forest, something unusual "
-            "appears. A tiny wooden door is built into the "
-            "trunk of an enormous tree. Fresh footprints "
-            "stop right in front of it. The forest is silent. "
-            "Would you have the courage to open that door?"
-        )
-    },
-    {
-        "category": "Miniature World",
-        "title": "A City Inside a Teacup",
-        "prompt": (
-            "Photorealistic macro tilt shift footage of a "
-            "detailed miniature city built inside a white "
-            "ceramic teacup. Tiny moving trains, glowing "
-            "apartment windows, miniature trees, rising steam, "
-            "realistic materials, cinematic camera orbit, vertical 9:16."
-        ),
-        "script": (
-            "Look carefully. Inside this ordinary teacup "
-            "is an entire miniature city. Tiny trains move "
-            "between buildings while warm lights glow "
-            "through the windows. Steam rises above the "
-            "rooftops like morning fog. What would you "
-            "build inside a teacup?"
-        )
-    },
-    {
-        "category": "Fantasy",
-        "title": "A Giant Whale Above the Clouds",
-        "prompt": (
-            "Photorealistic magical realism cinematic footage "
-            "of a gigantic gentle blue whale swimming above "
-            "golden clouds at sunrise. Realistic whale skin, "
-            "beautiful atmospheric lighting, distant birds, "
-            "smooth aerial camera tracking, vertical 9:16."
-        ),
-        "script": (
-            "Imagine looking out of an airplane window "
-            "and seeing a giant whale swimming above the clouds. "
-            "Its movement is peaceful as golden sunlight "
-            "fills the sky. This is an imaginary fantasy scene "
-            "made to look like a real discovery. What would "
-            "you name this incredible creature?"
+            "Deep inside a snowy forest, a curious red fox "
+            "discovers something extraordinary. A beautiful "
+            "little garden is hidden between the trees. "
+            "Warm golden light shines through the glass as "
+            "snowflakes fall silently. Sometimes the most "
+            "beautiful discoveries happen when we least expect them."
         )
     },
     {
         "category": "Nature",
-        "title": "A Flower After the Rain",
-        "prompt": (
-            "Ultra photorealistic macro nature video of a "
-            "beautiful purple flower opening after rainfall. "
-            "Individual water droplets rolling from petals, "
-            "soft morning sunlight, gentle breeze, detailed "
-            "pollen, cinematic macro camera, vertical 9:16."
-        ),
+        "tags": ["nature", "flower", "rain", "garden", "plant"],
+        "title": "The Beauty of Nature After Rain",
         "script": (
-            "Sometimes nature creates the most beautiful "
-            "moments. After the rain, a tiny flower slowly "
-            "opens toward the morning sunlight. Water droplets "
-            "slide across its delicate petals. Every little "
-            "detail tells a beautiful story. What is your "
-            "favorite thing about nature?"
-        )
-    },
-    {
-        "category": "Dream Places",
-        "title": "A Cabin Behind a Waterfall",
-        "prompt": (
-            "Photorealistic cinematic travel footage of a "
-            "beautiful wooden cabin hidden behind a powerful "
-            "forest waterfall. Real flowing water, drifting "
-            "mist, lush green plants, warm glowing windows, "
-            "slow cinematic camera movement, vertical 9:16."
-        ),
-        "script": (
-            "Imagine discovering a beautiful wooden cabin "
-            "hidden behind a waterfall. Water rushes past "
-            "the entrance while soft golden light shines "
-            "through the windows. Mist fills the surrounding "
-            "forest. It looks like the perfect escape. "
-            "Would you spend a weekend here?"
-        )
-    },
-    {
-        "category": "Food Art",
-        "title": "A Dessert That Looks Like a Planet",
-        "prompt": (
-            "Ultra photorealistic luxury food macro video "
-            "of a pastry chef creating a glossy spherical "
-            "blue planet dessert. Mirror glaze, delicate "
-            "edible details, precision tools, studio lighting, "
-            "slow cinematic close-up, vertical 9:16."
-        ),
-        "script": (
-            "At first glance, this looks like a tiny planet. "
-            "But it is actually an imaginative dessert. "
-            "A chef carefully adds the final details to "
-            "its glossy blue surface. It looks almost too "
-            "beautiful to eat. Would you taste this creation?"
+            "Have you ever stopped to admire nature after rain? "
+            "Tiny water droplets shine like diamonds on every leaf. "
+            "The morning sunlight slowly reaches the flowers, "
+            "and the entire garden comes alive again. "
+            "Sometimes happiness is hidden in the smallest moments."
         )
     },
     {
         "category": "Adventure",
-        "title": "A Train Above the Clouds",
-        "prompt": (
-            "Ultra photorealistic cinematic travel footage "
-            "of a red passenger train crossing an old stone "
-            "railway bridge above a misty mountain valley "
-            "at sunrise. Realistic moving train, pine forests, "
-            "golden atmospheric lighting, aerial camera, vertical 9:16."
-        ),
+        "tags": ["mountain", "train", "travel", "adventure", "bridge"],
+        "title": "The Most Beautiful Train Journey",
         "script": (
-            "A red train slowly appears through the morning "
-            "mist and crosses an ancient stone bridge. "
-            "Far below, a mountain valley disappears beneath "
-            "the clouds. Golden sunlight touches the hills. "
-            "It feels like the beginning of an unforgettable "
-            "journey. Where would you travel by train?"
+            "Imagine travelling through breathtaking mountains "
+            "while clouds float beneath your window. "
+            "An old railway bridge connects two distant hills. "
+            "Golden sunlight touches the landscape, creating "
+            "a view you will never forget. "
+            "Which destination would you choose?"
+        )
+    },
+    {
+        "category": "Satisfying",
+        "tags": ["art", "craft", "glass", "satisfying", "making"],
+        "title": "The Perfect Creative Transformation",
+        "script": (
+            "Watch closely as an ordinary material becomes "
+            "something extraordinary. Every movement is careful, "
+            "every detail matters, and the final result is "
+            "incredibly satisfying. It is amazing what patience "
+            "and creativity can achieve. "
+            "Could you make something like this?"
+        )
+    },
+    {
+        "category": "Fantasy",
+        "tags": ["ocean", "clouds", "sky", "water", "fantasy"],
+        "title": "A World Above the Clouds",
+        "script": (
+            "What if the sky was hiding an incredible secret? "
+            "Imagine floating above endless golden clouds, "
+            "watching a magical world unfold beneath you. "
+            "The sunlight creates a dreamlike atmosphere. "
+            "This is an imaginary world, but just imagine "
+            "if something like this really existed."
+        )
+    },
+    {
+        "category": "Food Art",
+        "tags": ["food", "cooking", "dessert", "chef", "kitchen"],
+        "title": "A Food Creation Worth Watching",
+        "script": (
+            "Some food creations are simply works of art. "
+            "Watch how every ingredient comes together "
+            "with incredible precision. The textures, colours "
+            "and final presentation make this creation "
+            "almost too beautiful to eat. "
+            "Would you try this delicious masterpiece?"
+        )
+    },
+    {
+        "category": "Mystery",
+        "tags": ["mystery", "fog", "forest", "abandoned", "door"],
+        "title": "Something Hidden in the Forest",
+        "script": (
+            "Something unusual is hiding deep inside this forest. "
+            "A mysterious path disappears into the fog. "
+            "Strange shadows move between the trees, "
+            "and nobody knows what lies at the end. "
+            "Would you continue walking, or turn back?"
+        )
+    },
+    {
+        "category": "Dream Places",
+        "tags": ["waterfall", "cabin", "lake", "travel", "landscape"],
+        "title": "A Dream House in the Mountains",
+        "script": (
+            "Imagine waking up in a peaceful cabin "
+            "surrounded by mountains and flowing waterfalls. "
+            "Fresh air fills the room as sunlight enters "
+            "through the windows. No traffic, no noise, "
+            "just the beauty of nature. "
+            "Would you live in a place like this?"
+        )
+    },
+    {
+        "category": "Technology",
+        "tags": ["technology", "robot", "machine", "computer", "future"],
+        "title": "A Glimpse Into the Future",
+        "script": (
+            "Imagine a future where technology changes "
+            "the way we live every single day. Smart machines "
+            "help people work, explore and create incredible things. "
+            "The future may look very different from today. "
+            "What invention would you like to see?"
+        )
+    },
+    {
+        "category": "Ocean",
+        "tags": ["ocean", "sea", "underwater", "fish", "diving"],
+        "title": "Discover the Hidden Ocean World",
+        "script": (
+            "Beneath the surface of the ocean lies "
+            "an extraordinary world. Beautiful underwater "
+            "landscapes, colourful marine life and sunlight "
+            "moving through crystal clear water create "
+            "an unforgettable scene. There is still so much "
+            "of our ocean left to discover."
         )
     }
 ]
@@ -234,111 +169,79 @@ def run(command, timeout=900):
     )
 
 
-def check_program(name):
-    from shutil import which
-    return which(name) is not None
+def check_tools():
+    for tool in ["ffmpeg", "ffprobe"]:
+        if not which(tool):
+            raise RuntimeError(f"{tool} is not installed.")
 
 
-def timestamp(seconds):
-    milliseconds = int(seconds * 1000)
+# =========================================
+# DAILY IDEA SELECTION
+# =========================================
 
-    hours, milliseconds = divmod(
-        milliseconds, 3600000
-    )
+def select_ideas():
 
-    minutes, milliseconds = divmod(
-        milliseconds, 60000
-    )
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
 
-    seconds, milliseconds = divmod(
-        milliseconds, 1000
-    )
+    rng = random.Random(int(today))
 
-    return (
-        f"{hours:02}:"
-        f"{minutes:02}:"
-        f"{seconds:02},"
-        f"{milliseconds:03}"
+    return rng.sample(
+        IDEAS,
+        DAILY_VIDEOS
     )
 
 
-# ==========================================
-# SELECT ORIGINAL VIDEO IDEA
-# ==========================================
+# =========================================
+# FREE FOOTAGE LIBRARY
+# =========================================
 
-def select_idea():
+def get_footage(idea, used):
 
-    seed = int(
+    files = [
+        p for p in FOOTAGE.rglob("*")
+        if p.is_file()
+        and p.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+    if not files:
+        raise RuntimeError(
+            "No footage found. Add free videos "
+            "inside the free_footage folder."
+        )
+
+    tags = idea["tags"]
+
+    matching = [
+        p for p in files
+        if any(tag in p.stem.lower() for tag in tags)
+    ]
+
+    candidates = matching if matching else files
+
+    unused = [
+        p for p in candidates
+        if p not in used
+    ]
+
+    rng = random.Random(
         datetime.now(timezone.utc).strftime("%Y%m%d")
+        + idea["title"]
     )
 
-    rng = random.Random(seed)
+    selected = rng.choice(unused or candidates)
 
-    return rng.choice(IDEAS)
+    used.add(selected)
 
+    log(f"Footage selected: {selected.name}")
 
-# ==========================================
-# GENERATE REAL AI VIDEO
-# ==========================================
-
-def generate_video(prompt):
-
-    token = os.getenv("HF_TOKEN", "").strip()
-
-    if not token:
-        raise RuntimeError(
-            "HF_TOKEN missing. Add Hugging Face token "
-            "in GitHub Actions Secrets."
-        )
-
-    log("Connecting to Hugging Face Inference...")
-
-    client = InferenceClient(
-        api_key=token,
-        timeout=900
-    )
-
-    log("Requesting one AI video generation...")
-
-    video_bytes = client.text_to_video(
-        prompt=prompt,
-        model=MODEL,
-        num_frames=49,
-        num_inference_steps=20,
-        guidance_scale=6.0,
-        negative_prompt=[
-            "blurry",
-            "low quality",
-            "distorted objects",
-            "bad anatomy",
-            "watermark",
-            "text",
-            "flickering"
-        ]
-    )
-
-    if not video_bytes or len(video_bytes) < 10000:
-        raise RuntimeError(
-            "AI provider returned an invalid video."
-        )
-
-    video_path = OUTPUT / "ai_source.mp4"
-
-    video_path.write_bytes(video_bytes)
-
-    log(
-        f"AI video downloaded: "
-        f"{len(video_bytes):,} bytes"
-    )
-
-    return video_path
+    return selected
 
 
-# ==========================================
-# GENERATE ENGLISH AI VOICE
-# ==========================================
+# =========================================
+# FREE EDGE TTS VOICE
+# =========================================
 
-async def edge_voice(script, output):
+async def create_edge_voice(script, output):
 
     communicator = edge_tts.Communicate(
         script,
@@ -350,31 +253,30 @@ async def edge_voice(script, output):
     await communicator.save(str(output))
 
 
-def generate_voice(script):
-
-    audio = OUTPUT / "voice.mp3"
+def generate_voice(script, output):
 
     try:
-        log("Generating natural English voice...")
+        log("Generating English AI voice...")
 
-        asyncio.run(edge_voice(script, audio))
+        asyncio.run(
+            create_edge_voice(script, output)
+        )
 
-        if audio.exists() and audio.stat().st_size > 1000:
-            return audio
+        if output.exists() and output.stat().st_size > 1000:
+            return output
 
-        raise RuntimeError("Edge TTS returned empty audio.")
+        raise RuntimeError("Empty Edge TTS audio.")
 
     except Exception as error:
 
-        log(f"Edge TTS unavailable: {error}")
+        log(f"Edge TTS failed: {error}")
 
-        # Offline fallback
-        if not check_program("espeak-ng"):
+        if not which("espeak-ng"):
             raise RuntimeError(
-                "Both Edge TTS and offline TTS are unavailable."
+                "No working voice engine available."
             )
 
-        wav = OUTPUT / "voice_fallback.wav"
+        wav = output.with_suffix(".wav")
 
         run([
             "espeak-ng",
@@ -389,18 +291,17 @@ def generate_voice(script):
             "-i", str(wav),
             "-codec:a", "libmp3lame",
             "-q:a", "3",
-            str(audio)
+            str(output)
         ])
 
-        if not audio.exists() or audio.stat().st_size < 1000:
-            raise RuntimeError("Offline voice generation failed.")
+        wav.unlink(missing_ok=True)
 
-        return audio
+        return output
 
 
-# ==========================================
+# =========================================
 # AUDIO DURATION
-# ==========================================
+# =========================================
 
 def audio_duration(audio):
 
@@ -420,11 +321,22 @@ def audio_duration(audio):
     return float(result.stdout.strip())
 
 
-# ==========================================
-# CAPTION GENERATION
-# ==========================================
+# =========================================
+# AUTOMATIC SUBTITLES
+# =========================================
 
-def generate_captions(script, duration):
+def timestamp(seconds):
+
+    ms = int(seconds * 1000)
+
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+def generate_captions(script, duration, output):
 
     words = script.split()
 
@@ -433,28 +345,19 @@ def generate_captions(script, duration):
         for i in range(0, len(words), 5)
     ]
 
-    total_words = sum(
-        len(chunk) for chunk in chunks
-    )
-
+    total = len(words)
     current = 0.0
 
-    caption_file = OUTPUT / "captions.srt"
-
-    with open(
-        caption_file,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    with open(output, "w", encoding="utf-8") as f:
 
         for index, chunk in enumerate(chunks, 1):
 
-            part = duration * len(chunk) / total_words
+            part = duration * len(chunk) / total
 
             start = current
             end = current + part
 
-            file.write(
+            f.write(
                 f"{index}\n"
                 f"{timestamp(start)} --> "
                 f"{timestamp(end)}\n"
@@ -463,16 +366,16 @@ def generate_captions(script, duration):
 
             current = end
 
-    return caption_file
+    return output
 
 
-# ==========================================
-# VIDEO RENDERING
-# ==========================================
+# =========================================
+# CINEMATIC VIDEO EDITING
+# =========================================
 
 def render_video(source, audio, captions, output, duration):
 
-    log("Rendering vertical 1080x1920 video...")
+    log("Creating cinematic vertical video...")
 
     subtitle_path = (
         captions.resolve().as_posix()
@@ -484,8 +387,11 @@ def render_video(source, audio, captions, output, duration):
         "scale=1080:1920:"
         "force_original_aspect_ratio=increase,"
         "crop=1080:1920,"
-        "setsar=1,"
-        "fps=30,"
+        "zoompan="
+        "z='min(zoom+0.0004,1.08)':"
+        "x='iw/2-(iw/zoom/2)':"
+        "y='ih/2-(ih/zoom/2)':"
+        "d=1:s=1080x1920:fps=30,"
         f"subtitles='{subtitle_path}':"
         "force_style='"
         "FontName=DejaVu Sans,"
@@ -501,8 +407,7 @@ def render_video(source, audio, captions, output, duration):
     )
 
     run([
-        "ffmpeg",
-        "-y",
+        "ffmpeg", "-y",
         "-stream_loop", "-1",
         "-i", str(source),
         "-i", str(audio),
@@ -512,7 +417,7 @@ def render_video(source, audio, captions, output, duration):
         "-t", str(duration),
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "23",
+        "-crf", "24",
         "-pix_fmt", "yuv420p",
         "-r", "30",
         "-c:a", "aac",
@@ -523,85 +428,57 @@ def render_video(source, audio, captions, output, duration):
     ])
 
     if not output.exists() or output.stat().st_size < 50000:
-        raise RuntimeError("Final video creation failed.")
+        raise RuntimeError("Video rendering failed.")
 
-    log("Final MP4 successfully created.")
+    log(f"Created: {output.name}")
 
 
-# ==========================================
-# MAIN
-# ==========================================
+# =========================================
+# GENERATE ONE SHORT
+# =========================================
 
-def main():
+def generate_short(idea, index, used):
 
-    log("================================")
-    log("AI REALISTIC SHORTS STARTED")
-    log("================================")
-
-    if not check_program("ffmpeg"):
-        raise RuntimeError("FFmpeg is missing.")
-
-    if not check_program("ffprobe"):
-        raise RuntimeError("FFprobe is missing.")
-
-    idea = select_idea()
-
-    category = idea["category"]
     title = idea["title"]
-    prompt = idea["prompt"]
     script = idea["script"]
 
-    log(f"Category: {category}")
-    log(f"Title: {title}")
+    log("--------------------------------")
+    log(f"SHORT {index}: {title}")
+    log(f"Category: {idea['category']}")
 
-    (OUTPUT / "script.txt").write_text(
-        script,
-        encoding="utf-8"
-    )
+    source = get_footage(idea, used)
 
-    (OUTPUT / "video_prompt.txt").write_text(
-        prompt,
-        encoding="utf-8"
-    )
+    audio = OUTPUT / f"voice_{index}.mp3"
 
-    metadata = {
-        "title": title,
-        "category": category,
-        "description": (
-            script
-            + "\n\nAI-generated fictional visual."
-        ),
-        "generated_at": datetime.now(
-            timezone.utc
-        ).isoformat()
-    }
-
-    (OUTPUT / "metadata.json").write_text(
-        json.dumps(metadata, indent=2),
-        encoding="utf-8"
-    )
-
-    # One real AI video generation attempt
-    source = generate_video(prompt)
-
-    # Narration
-    audio = generate_voice(script)
+    generate_voice(script, audio)
 
     duration = audio_duration(audio)
 
-    if duration < 10 or duration > MAX_SECONDS:
+    if duration < 8:
+        raise RuntimeError("Voice duration too short.")
+
+    if duration > MAX_SECONDS:
         raise RuntimeError(
-            f"Invalid audio duration: {duration:.2f}"
+            f"Voice duration exceeds {MAX_SECONDS} seconds."
         )
 
-    # Captions
-    captions = generate_captions(
+    captions = OUTPUT / f"captions_{index}.srt"
+
+    generate_captions(
         script,
-        duration
+        duration,
+        captions
     )
 
-    # Final rendering
-    final = OUTPUT / "viral_short.mp4"
+    safe_title = re.sub(
+        r"[^a-zA-Z0-9_-]",
+        "_",
+        title
+    )[:50]
+
+    final = OUTPUT / (
+        f"{index:02d}_{safe_title}.mp4"
+    )
 
     render_video(
         source,
@@ -611,10 +488,89 @@ def main():
         duration
     )
 
+    metadata = {
+        "title": title,
+        "category": idea["category"],
+        "description": (
+            script
+            + "\n\nVisual footage used under its applicable license. "
+            + "Original narration and editing."
+        ),
+        "source_footage": source.name,
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat()
+    }
+
+    (OUTPUT / f"{index:02d}_metadata.json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8"
+    )
+
+    audio.unlink(missing_ok=True)
+    captions.unlink(missing_ok=True)
+
+    log(f"SHORT {index} COMPLETED")
+
+    return final
+
+
+# =========================================
+# MAIN AUTOMATION
+# =========================================
+
+def main():
+
     log("================================")
-    log("AUTOMATION COMPLETED")
-    log(f"OUTPUT: {final}")
+    log("FREE AI VIRAL SHORTS STARTED")
     log("================================")
+
+    check_tools()
+
+    if not FOOTAGE.exists():
+        raise RuntimeError(
+            "Create the free_footage folder first."
+        )
+
+    # Remove previous outputs
+    for item in OUTPUT.iterdir():
+        if item.is_file():
+            item.unlink()
+
+    ideas = select_ideas()
+
+    used = set()
+    completed = []
+
+    for index, idea in enumerate(ideas, 1):
+
+        try:
+            video = generate_short(
+                idea,
+                index,
+                used
+            )
+
+            completed.append(video)
+
+        except Exception as error:
+            log(f"SHORT {index} FAILED: {error}")
+
+    log("================================")
+    log(f"VIDEOS CREATED: {len(completed)}/4")
+    log("================================")
+
+    if not completed:
+        raise RuntimeError(
+            "No Shorts could be generated."
+        )
+
+    if len(completed) < DAILY_VIDEOS:
+        raise RuntimeError(
+            f"Only {len(completed)} of 4 videos created."
+        )
+
+    log("ALL FOUR SHORTS COMPLETED SUCCESSFULLY")
 
 
 if __name__ == "__main__":
